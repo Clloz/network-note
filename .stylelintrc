@@ -1,0 +1,24 @@
+{
+    "defaultSeverity": "error",
+    "extends": ["stylelint-config-standard"],
+    "rules": {
+        "declaration-block-semicolon-newline-after": "always",
+        "indentation": [
+            4,
+            {
+                "baseIndentLevel": 1
+            }
+        ],
+        "declaration-no-important": true
+    },
+    "overrides": [
+        {
+            "files": ["**/*.html"],
+            "customSyntax": "postcss-html"
+        },
+        {
+            "files": ["**/*.js", "**/*.jsx"],
+            "customSyntax": "@stylelint/postcss-css-in-js"
+        }
+    ]
+}
