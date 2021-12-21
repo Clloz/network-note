@@ -86,8 +86,9 @@ function stringToUtf8(str) {
     return Uint8Array.from(result);
 }
 
-// 反掩码，请求的 payload 都是经过掩码处理的，要看实际内容先要反掩码
-function unMask(data, mask) {
+// 带掩码的数据的编解码，编解码的方式都一样的
+function maskCodec(data, mask) {
+    if (mask.length !== 4) return data;
     const { length } = data;
     const result = new Uint8Array(length);
     for (let i = 0; i < length; i += 1) {
@@ -131,29 +132,61 @@ function decodeWebSocketFrame(data) {
         frame.maskedPayload = data.slice(14);
     }
 
-    frame.unMaskedPayload = unMask(frame.maskedPayload, frame.maskingKey); // 解码
+    frame.unMaskedPayload = maskCodec(frame.maskedPayload, frame.maskingKey); // 解码
     console.log(frame);
     return frame;
 }
 
 /**
- * @description: 封装要发送的数据帧，作为一个小 demo 就不处理 extendPayloadLength 以及 mask 了，这里我是用两个字符串发送了两个连续帧，
- * 不出意外这两个连续帧会在 DevTools 的 Network 中被拼为一个字符串。
- * @param:
- * @return:
+ * @description: 这里的分别测试了发送单帧和连续帧的两种情况
+ * 这里我设置了封装帧的时候可以设置掩码，实际服务端向客服端发送的数据的时候浏览器不一定支持用掩码
+ * 比如 chrome，如果你用掩码就会报错 `A server must not mask any frames that it sends to the client.` 参考 https://stackoverflow.com/a/16935108/8854649
+ * @param maskingKey: 掩码，如果不需要用掩码则传入 [] 即可
+ * @param data1: 第一帧的数据
+ * @param data2: 第二帧的数据（optional）
+ * @return result 封装好的帧数据
  */
-function decodeWebsocketFrame(data1, data2) {
-    const dataBuf1 = stringToUtf8(data1);
-    const dataBuf2 = stringToUtf8(data2);
-    const frame1 = Buffer.concat(
-        [Buffer.from([1, dataBuf1.length]), dataBuf1],
-        2 + dataBuf1.length,
-    );
-    const frame2 = Buffer.concat(
-        [Buffer.from([128, dataBuf2.length]), dataBuf2],
-        2 + dataBuf2.length,
-    );
-    return [frame1, frame2]; //
+function encodeWebsocketFrame(maskingKey, data1, data2) {
+    let result;
+    const mask = maskingKey && maskingKey.length === 4 ? maskingKey : [];
+    if (data2) {
+        const dataBuf1 = stringToUtf8(data1);
+        const dataBuf2 = stringToUtf8(data2);
+        const frame1 = Buffer.concat(
+            [
+                Buffer.from([
+                    0b00000001,
+                    dataBuf1.length + (mask.length ? 0b10000000 : 0),
+                    ...mask,
+                ]),
+                maskCodec(dataBuf1, mask),
+            ],
+            2 + mask.length + dataBuf1.length,
+        );
+        const frame2 = Buffer.concat(
+            [
+                Buffer.from([
+                    0b10000000,
+                    dataBuf2.length + (mask.length ? 0b10000000 : 0),
+                    ...mask,
+                ]),
+                maskCodec(dataBuf2, mask),
+            ],
+            2 + mask.length + dataBuf2.length,
+        );
+        result = [frame1, frame2];
+    } else {
+        const dataBuf = stringToUtf8(data1);
+        result = Buffer.concat(
+            [
+                Buffer.from([0b10000001, dataBuf.length + (mask.length ? 0b10000000 : 0), ...mask]),
+                maskCodec(dataBuf, mask),
+            ],
+            2 + mask.length + dataBuf.length,
+        );
+    }
+    console.log(result);
+    return result;
 }
 
 const server = net.createServer(socket => {
@@ -174,16 +207,19 @@ const server = net.createServer(socket => {
             const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
             const key = headers['sec-websocket-key'];
             const acceptKey = crypto
-                .createHash('sha1')
-                .update(key + GUID)
-                .digest('base64');
+                .createHash('sha1') // 创建 sha1 hash 对象
+                .update(key + GUID) // 更新 hash 对象内容
+                .digest('base64'); // 生成摘要
             const response = `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${acceptKey}\r\n\r\n`;
             socket.write(response);
             console.log(response);
 
+            let maskingKey = [];
+
             socket.on('data', msgBuffer => {
                 console.log(Object.prototype.toString.call(msgBuffer)); // 确定 buffer 的类型 Uint8Array
-                const frame = decodeWebSocketFrame(msgBuffer);
+                const frame = decodeWebSocketFrame(msgBuffer); // 解码
+                maskingKey = frame.maskingKey;
                 console.log(frame.opcode);
                 // 只处理了 字符，二进制和关闭三种情况
                 switch (frame.opcode) {
@@ -202,13 +238,23 @@ const server = net.createServer(socket => {
                 }
             });
 
-            const [frame1, frame2] = decodeWebsocketFrame('cll𝌆oz', 'finish');
+            console.log(maskingKey);
+            // 发送连续帧数据
+            const [frame1, frame2] = encodeWebsocketFrame([], 'cll𝌆oz', 'finish');
             setInterval(() => {
                 socket.write(frame1);
                 socket.write(frame2);
             }, 1000);
+
+            // 发送单帧数据
+            const singleFrame = encodeWebsocketFrame(
+                [],
+                JSON.stringify({ type: 'message', data: 'refresh' }),
+            );
+            setInterval(() => {
+                socket.write(singleFrame);
+            }, 3000);
         }
     });
 });
-
-server.listen(3000);
+server.listen(3000); // 监听端口
